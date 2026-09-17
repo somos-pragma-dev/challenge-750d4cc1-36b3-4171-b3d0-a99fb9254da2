@@ -1,0 +1,150 @@
+spring:
+  application:
+    name: reconciliation-service
+  
+  # Configuración de PostgreSQL para persistencia de conciliaciones
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:reconciliation}
+    username: ${DB_USER:reconciliation_user}
+    password: ${DB_PASSWORD:reconciliation_pass}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      pool-name: ReconciliationHikariPool
+  
+  # Configuración de JPA/Hibernate
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+  
+  # Configuración de Kafka para consumo de streams
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: reconciliation-consumer-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.example.reconciliation.*
+        spring.json.type.mapping: "ReconciliationEvent:com.example.reconciliation.domain.event.ReconciliationEvent"
+        max.poll.records: 500
+        max.poll.interval.ms: 300000
+        session.timeout.ms: 10000
+        heartbeat.interval.ms: 3000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+    listener:
+      ack-mode: manual_immediate
+      concurrency: 3
+
+# Configuración del servidor embebido (Netty para WebFlux)
+server:
+  port: ${SERVER_PORT:8080}
+  netty:
+    connection-timeout: 60s
+
+# Configuración de Actuator para monitoreo
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics,loggers
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+    kafka:
+      enabled: true
+    db:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+        step: 1m
+    tags:
+      application: ${spring.application.name}
+
+# Configuración específica del sistema de conciliación
+reconciliation:
+  # Ventana de matching de 5 minutos (300 segundos)
+  # Justificación: balance entre latencia y tolerancia a mensajes fuera de orden
+  # - 5 min permite capturar mensajes delayed de las 3 fuentes
+  # - No es tan largo como para acumular demasiados movimientos pendientes
+  # - El core bancario típicamente procesa en < 2 min
+  # - Gateway de pagos puede tener latencia de hasta 3 min
+  # - Sistema de liquidación opera en batches de 1 min
+  matching-window-seconds: 300
+  
+  # Tolerancia a mensajes fuera de orden (en segundos)
+  # Permite recibir mensajes con timestamp hasta 2 minutos en el pasado
+  out-of-order-tolerance-seconds: 120
+  
+  # SLA de lag de conciliación (en segundos)
+  # Si un movimiento tarda más de este tiempo en conciliarse, se dispara alerta
+  lag-sla-seconds: 600
+  
+  # Configuración de retry para reprocesamiento
+  retry:
+    max-attempts: 3
+    initial-interval-ms: 1000
+    multiplier: 2.0
+    max-interval-ms: 30000
+  
+  # Configuración de cleanup de movimientos antigos
+  cleanup:
+    enabled: true
+    retention-days: 90
+    batch-size: 1000
+  
+  # Fuentes de datos configuradas
+  sources:
+    - name: CORE_BANKING
+      topic: movements.core-banking
+      priority: 1
+    - name: PAYMENT_GATEWAY
+      topic: movements.payment-gateway
+      priority: 2
+    - name: LIQUIDATION_SYSTEM
+      topic: movements.liquidation
+      priority: 3
+
+# Logging
+logging:
+  level:
+    root: INFO
+    com.example.reconciliation: DEBUG
+    org.springframework.kafka: INFO
+    org.hibernate.SQL: WARN
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
